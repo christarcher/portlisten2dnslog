@@ -1,0 +1,27 @@
+[Unit]
+Description=PortListener2DNS DNSLog collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=portlistener2dns
+EnvironmentFile=/etc/portlistener2dns/server.env
+WorkingDirectory=/var/lib/portlistener2dns
+ExecStart=/opt/portlistener2dns-server/.venv/bin/portlistener2dns-server
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

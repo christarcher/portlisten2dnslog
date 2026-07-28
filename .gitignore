@@ -1,0 +1,45 @@
+# Go
+/bin/
+/client/bin/
+*.exe
+*.test
+*.coverprofile
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+*.egg-info/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+/dist/
+/build/
+/client/build/
+/server/dist/
+/server/build/
+
+# Runtime state and local secrets
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+client.env
+server.env
+server.toml
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
