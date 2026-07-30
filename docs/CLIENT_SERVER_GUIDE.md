@@ -216,7 +216,7 @@ Client 超时重试始终复用同一个 UUID。递归 DNS 也可能重复查询
 | `P2D_XOR_KEY` | 是 | 无 | 至少 8 个 UTF-8 字节 |
 | `P2D_AUTH_KEY` | 是 | 无 | 至少 32 个 UTF-8 字节 |
 | `P2D_BIND_ADDRESS` | 否 | `0.0.0.0` | IPv4/IPv6 地址 |
-| `P2D_PORTS` | 否 | `139,445,1080,1099` | 1–65535，逗号分隔，不允许重复 |
+| `P2D_PORTS` | 否 | 候选池中随机 3–5 个 | 固定端口为 1–65535，逗号分隔，不允许重复 |
 | `P2D_MARKER` | 否 | `listener-req` | 单个 DNS 标签 |
 | `P2D_QUEUE_SIZE` | 否 | `256` | 正整数 |
 | `P2D_WORKERS` | 否 | `2` | 正整数 |
@@ -224,15 +224,20 @@ Client 超时重试始终复用同一个 UUID。递归 DNS 也可能重复查询
 | `P2D_QUERY_TIMEOUT` | 否 | `3s` | Go duration，例如 `500ms`、`3s` |
 | `P2D_VERBOSE` | 否 | `false` | `true` 时向 stderr 输出排错日志 |
 
-多个端口只需一个进程：
+未设置或留空 `P2D_PORTS` 时，Client 会将 `internal/client/defaults.go` 中的候选池
+随机打乱，并选择 3–5 个端口。若某个端口已被占用，则从打乱后的剩余候选中继续补选，
+直到达到本次随机确定的数量。若候选池不足，或遇到权限不足、地址无效等非占用错误，
+Client 会关闭本次已打开的全部监听器并退出。
+
+如需固定端口，多个端口仍只需一个进程：
 
 ```text
 P2D_BIND_ADDRESS=0.0.0.0
 P2D_PORTS=139,445,1080,1099
 ```
 
-启动时会先绑定全部地址。只要其中一个失败，已打开的监听器会全部关闭，然后程序以
-退出码 1 结束。
+显式指定 `P2D_PORTS` 时不启用自动替补。只要其中一个端口绑定失败，已打开的监听器会
+全部关闭，然后程序以退出码 1 结束。
 
 白名单支持 IPv4 和 IPv6，但不接受 CIDR。匹配时 IPv4 映射的 IPv6 地址会规范化为
 IPv4。若环境变量未设置则采用编译默认值；显式设置 `P2D_IP_WHITELIST=` 可禁用默认
@@ -469,7 +474,7 @@ systemd 运行，还要临时取消 `StandardOutput=null` 和 `StandardError=nul
 - `P2D_DNS_SERVER` 使用了主机名而不是 IP；
 - `P2D_IP_WHITELIST` 包含无效或重复 IP；
 - `P2D_AUTH_KEY` 少于 32 字节；
-- `P2D_PORTS` 包含空值、重复端口或超出 1–65535；
+- 显式设置的 `P2D_PORTS` 包含空值、重复端口或超出 1–65535；
 - `P2D_BIND_ADDRESS` 不是合法 IP；
 - `P2D_QUERY_TIMEOUT` 不是 Go duration。
 
@@ -478,8 +483,10 @@ systemd 运行，还要临时取消 `StandardOutput=null` 和 `StandardError=nul
 
 ### 端口只监听了一部分
 
-正常实现不会进入部分监听状态。任意端口绑定失败都会关闭全部监听器并退出。检查端口
-是否已被其他服务占用，以及 Linux 是否具有低端口 capability。
+正常实现不会进入部分监听状态。自动端口模式遇到端口占用时会从剩余候选池补选；候选
+池不足或遇到其他绑定错误时，会关闭全部监听器并退出。显式端口模式下任意端口绑定失败
+都会整体退出。若启动失败，请检查 Linux 是否具有低端口 capability，并在
+`P2D_VERBOSE=true` 下确认具体错误。
 
 ### dnslog.org 有记录但 Server 不处理
 

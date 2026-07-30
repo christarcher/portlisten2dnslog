@@ -182,3 +182,92 @@ func TestRunIgnoresWhitelistedSourceIP(t *testing.T) {
 		t.Fatal("Run did not stop after cancellation")
 	}
 }
+
+func TestRunReplacesOccupiedAutomaticPort(t *testing.T) {
+	primaryReservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryAddress := primaryReservation.Addr().String()
+	if err := primaryReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	replacementReservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementAddress := replacementReservation.Addr().String()
+	if err := replacementReservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Listen:         []string{primaryAddress, occupied.Addr().String()},
+		FallbackListen: []string{replacementAddress},
+		IPWhitelist:    map[netip.Addr]struct{}{netip.MustParseAddr("127.0.0.1"): {}},
+		QueueSize:      1,
+		Workers:        1,
+		QueryTimout:    time.Second,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- Run(ctx, cfg, log.New(io.Discard, "", 0))
+	}()
+
+	primaryConnection := waitForTCPListener(t, primaryAddress, runResult)
+	_ = primaryConnection.Close()
+	replacementConnection := waitForTCPListener(t, replacementAddress, runResult)
+	_ = replacementConnection.Close()
+	cancel()
+
+	select {
+	case err := <-runResult:
+		if err != nil {
+			t.Fatalf("Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+}
+
+func TestRunRejectsOccupiedExplicitPort(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+
+	cfg := Config{Listen: []string{occupied.Addr().String()}}
+	err = Run(context.Background(), cfg, log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("Run accepted an occupied explicit port")
+	}
+}
+
+func waitForTCPListener(t *testing.T, address string, runResult <-chan error) net.Conn {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		connection, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			return connection
+		}
+		select {
+		case runErr := <-runResult:
+			t.Fatalf("Run exited before listening on replacement port: %v", runErr)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("could not connect to replacement listener %s", address)
+	return nil
+}

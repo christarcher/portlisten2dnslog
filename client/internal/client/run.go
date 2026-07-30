@@ -14,15 +14,9 @@ import (
 )
 
 func Run(ctx context.Context, cfg Config, logger *log.Logger) error {
-	listeners := make([]net.Listener, 0, len(cfg.Listen))
-	for _, address := range cfg.Listen {
-		listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
-		if err != nil {
-			closeListeners(listeners)
-			return fmt.Errorf("监听 %s: %w", address, err)
-		}
-		listeners = append(listeners, listener)
-		logger.Printf("正在监听 TCP %s", listener.Addr())
+	listeners, err := openListeners(ctx, cfg, logger)
+	if err != nil {
+		return err
 	}
 
 	events := make(chan protocol.Event, cfg.QueueSize)
@@ -51,6 +45,49 @@ func Run(ctx context.Context, cfg Config, logger *log.Logger) error {
 	workerGroup.Wait()
 	logger.Print("已停止")
 	return nil
+}
+
+func openListeners(ctx context.Context, cfg Config, logger *log.Logger) ([]net.Listener, error) {
+	targetCount := len(cfg.Listen)
+	if targetCount == 0 {
+		return nil, errors.New("没有可监听的 TCP 地址")
+	}
+
+	replaceOccupied := len(cfg.FallbackListen) > 0
+	candidates := cfg.Listen
+	if replaceOccupied {
+		candidates = make([]string, 0, len(cfg.Listen)+len(cfg.FallbackListen))
+		candidates = append(candidates, cfg.Listen...)
+		candidates = append(candidates, cfg.FallbackListen...)
+	}
+
+	listeners := make([]net.Listener, 0, targetCount)
+	var lastOccupiedErr error
+	for _, address := range candidates {
+		listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", address)
+		if err != nil {
+			if replaceOccupied && isAddressInUse(err) {
+				lastOccupiedErr = err
+				logger.Printf("TCP %s 已被占用，从剩余候选端口继续选择", address)
+				continue
+			}
+			closeListeners(listeners)
+			return nil, fmt.Errorf("监听 %s: %w", address, err)
+		}
+		listeners = append(listeners, listener)
+		logger.Printf("正在监听 TCP %s", listener.Addr())
+		if len(listeners) == targetCount {
+			return listeners, nil
+		}
+	}
+
+	closeListeners(listeners)
+	return nil, fmt.Errorf(
+		"自动端口池可用端口不足，只能监听 %d/%d 个端口: %w",
+		len(listeners),
+		targetCount,
+		lastOccupiedErr,
+	)
 }
 
 func acceptLoop(

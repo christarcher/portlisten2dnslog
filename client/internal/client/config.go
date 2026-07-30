@@ -3,6 +3,7 @@ package client
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
@@ -14,18 +15,19 @@ import (
 )
 
 type Config struct {
-	Domain      string
-	DNSServer   string
-	XORKey      []byte
-	AuthKey     []byte
-	Listen      []string
-	IPWhitelist map[netip.Addr]struct{}
-	Marker      string
-	QueueSize   int
-	Workers     int
-	Retries     int
-	QueryTimout time.Duration
-	Verbose     bool
+	Domain         string
+	DNSServer      string
+	XORKey         []byte
+	AuthKey        []byte
+	Listen         []string
+	FallbackListen []string
+	IPWhitelist    map[netip.Addr]struct{}
+	Marker         string
+	QueueSize      int
+	Workers        int
+	Retries        int
+	QueryTimout    time.Duration
+	Verbose        bool
 }
 
 // ConfigFromEnv reads all configuration once and then removes it from the
@@ -93,12 +95,17 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("P2D_IP_WHITELIST: %w", err)
 	}
 
-	cfg.Listen, err = parseListenAddresses(
-		valueOrDefault(values["P2D_BIND_ADDRESS"], defaultBindAddress),
-		valueOrDefault(values["P2D_PORTS"], defaultPorts),
-	)
-	if err != nil {
-		return Config{}, err
+	bindAddress := valueOrDefault(values["P2D_BIND_ADDRESS"], defaultBindAddress)
+	if strings.TrimSpace(values["P2D_PORTS"]) == "" {
+		cfg.Listen, cfg.FallbackListen, err = randomListenAddresses(bindAddress)
+		if err != nil {
+			return Config{}, err
+		}
+	} else {
+		cfg.Listen, err = parseListenAddresses(bindAddress, values["P2D_PORTS"])
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
 	if cfg.QueueSize, err = parsePositiveInt(values["P2D_QUEUE_SIZE"], defaultQueueSize); err != nil {
@@ -150,9 +157,9 @@ func parseIPWhitelist(value string) (map[netip.Addr]struct{}, error) {
 }
 
 func parseListenAddresses(bindAddress, portsValue string) ([]string, error) {
-	bindAddress = strings.Trim(strings.TrimSpace(bindAddress), "[]")
-	if net.ParseIP(bindAddress) == nil {
-		return nil, errors.New("P2D_BIND_ADDRESS 必须是 IPv4 或 IPv6 地址")
+	bindAddress, err := normalizeBindAddress(bindAddress)
+	if err != nil {
+		return nil, err
 	}
 
 	seen := make(map[int]struct{})
@@ -173,6 +180,32 @@ func parseListenAddresses(bindAddress, portsValue string) ([]string, error) {
 		return nil, errors.New("P2D_PORTS 不能为空")
 	}
 	return addresses, nil
+}
+
+func randomListenAddresses(bindAddress string) ([]string, []string, error) {
+	bindAddress, err := normalizeBindAddress(bindAddress)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ports := append([]int(nil), automaticPortPool[:]...)
+	rand.Shuffle(len(ports), func(left, right int) {
+		ports[left], ports[right] = ports[right], ports[left]
+	})
+	listenCount := minAutomaticPorts + rand.IntN(maxAutomaticPorts-minAutomaticPorts+1)
+	addresses := make([]string, 0, len(ports))
+	for _, port := range ports {
+		addresses = append(addresses, net.JoinHostPort(bindAddress, strconv.Itoa(port)))
+	}
+	return addresses[:listenCount], addresses[listenCount:], nil
+}
+
+func normalizeBindAddress(value string) (string, error) {
+	value = strings.Trim(strings.TrimSpace(value), "[]")
+	if net.ParseIP(value) == nil {
+		return "", errors.New("P2D_BIND_ADDRESS 必须是 IPv4 或 IPv6 地址")
+	}
+	return value, nil
 }
 
 func valueOrDefault(value, fallback string) string {
