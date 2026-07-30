@@ -41,6 +41,7 @@ client/
 ├── internal/
 │   ├── client/
 │   │   ├── config.go
+│   │   ├── defaults.go
 │   │   ├── dns.go
 │   │   └── run.go
 │   └── protocol/
@@ -57,8 +58,9 @@ client/
 | 文件 | 职责 |
 |---|---|
 | `cmd/portlistener2dns/main.go` | 读取配置、选择静默/排错日志、处理退出信号 |
-| `internal/client/config.go` | 读取并清除环境变量，校验 DNS、端口、密钥和并发参数 |
-| `internal/client/run.go` | 原子创建全部监听器、接受连接、构造事件和管理发送 worker |
+| `internal/client/defaults.go` | 集中保存编译进客户端的非敏感默认值 |
+| `internal/client/config.go` | 读取并清除环境变量，校验 DNS、白名单、端口、密钥和并发参数 |
+| `internal/client/run.go` | 原子创建全部监听器、过滤白名单、构造事件和管理发送 worker |
 | `internal/client/dns.go` | 构造最小 DNS A 请求、发送 UDP 查询、验证响应和超时重试 |
 | `internal/protocol/protocol.go` | UUID、二进制编码、HMAC、XOR、Base32 和 DNS 标签切分 |
 | `scripts/build.ps1` | 测试后使用 Garble 构建 Linux amd64/arm64 和 Windows amd64 产物 |
@@ -209,7 +211,8 @@ Client 超时重试始终复用同一个 UUID。递归 DNS 也可能重复查询
 | 变量 | 必需 | 默认值 | 校验/行为 |
 |---|---|---|---|
 | `P2D_DOMAIN` | 是 | 无 | 去掉首尾点后必须是合法 DNS 名 |
-| `P2D_DNS_SERVER` | 是 | 无 | 必须为 IP 或 `IP:端口`，不接受主机名 |
+| `P2D_DNS_SERVER` | 否 | `223.5.5.5` | 必须为 IP 或 `IP:端口`，不接受主机名 |
+| `P2D_IP_WHITELIST` | 否 | `192.168.100.254,192.168.100.253` | 逗号分隔的完整来源 IP；命中后不告警 |
 | `P2D_XOR_KEY` | 是 | 无 | 至少 8 个 UTF-8 字节 |
 | `P2D_AUTH_KEY` | 是 | 无 | 至少 32 个 UTF-8 字节 |
 | `P2D_BIND_ADDRESS` | 否 | `0.0.0.0` | IPv4/IPv6 地址 |
@@ -230,6 +233,10 @@ P2D_PORTS=139,445,1080,1099
 
 启动时会先绑定全部地址。只要其中一个失败，已打开的监听器会全部关闭，然后程序以
 退出码 1 结束。
+
+白名单支持 IPv4 和 IPv6，但不接受 CIDR。匹配时 IPv4 映射的 IPv6 地址会规范化为
+IPv4。若环境变量未设置则采用编译默认值；显式设置 `P2D_IP_WHITELIST=` 可禁用默认
+白名单。命中的 TCP 连接仍会被立即关闭，但不会生成 UUID、入队或发送 DNS 查询。
 
 Client 退出码：
 
@@ -363,7 +370,8 @@ $env:P2D_VERBOSE = 'true'
 
 ### 9.1 Client
 
-构建并安装：
+构建并安装。先用 `uname -m` 确认架构：`x86_64` 选择 `linux-amd64`，
+`aarch64`/`arm64` 选择 `linux-arm64`。以下以 amd64 为例：
 
 ```sh
 sudo install -m 0755 \
@@ -371,7 +379,10 @@ sudo install -m 0755 \
   /usr/local/bin/portlistener2dns
 
 sudo install -d -m 0700 /etc/portlistener2dns
-sudo install -m 0600 client/client.env /etc/portlistener2dns/client.env
+sudo install -m 0600 \
+  client/config/client.env.example \
+  /etc/portlistener2dns/client.env
+sudoedit /etc/portlistener2dns/client.env
 sudo install -m 0644 \
   client/deploy/systemd/portlistener2dns-client.service \
   /etc/systemd/system/portlistener2dns-client.service
@@ -380,8 +391,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now portlistener2dns-client
 ```
 
-该单元使用动态非特权用户，只授予 `CAP_NET_BIND_SERVICE` 以监听 1024 以下端口，并将
-stdout/stderr 指向空设备。
+环境文件至少填写 `P2D_DOMAIN`、`P2D_XOR_KEY` 和 `P2D_AUTH_KEY`。DNS 服务器与 IP
+白名单已有编译默认值，只在需要覆盖时写入环境文件。该单元使用动态非特权用户，只授予
+`CAP_NET_BIND_SERVICE` 以监听 1024 以下端口，并将 stdout/stderr 指向空设备。
 
 ### 9.2 Server
 
@@ -422,7 +434,7 @@ Client 默认没有应用日志。需要排错时临时将环境文件中的 `P2
 1. Server 设置 `P2D_CHECK_CONFIG=true` 验证全部必需变量；
 2. Server 正式启动并确认能读取 dnslog.org；
 3. Client 临时设置 `P2D_VERBOSE=true`，确认全部端口绑定成功；
-4. 从另一台内网主机连接一个监听端口；
+4. 确认测试主机不在 `P2D_IP_WHITELIST`，再连接一个监听端口；
 5. 在 dnslog.org API 中确认出现带 UUID 和 marker 的查询；
 6. 查看 Server 是否记录新 UUID；
 7. 查看 Telegram 是否收到源、目标和时间；
@@ -453,8 +465,9 @@ systemd 运行，还要临时取消 `StandardOutput=null` 和 `StandardError=nul
 
 环境变量配置无效。常见原因：
 
-- `P2D_DOMAIN`、`P2D_DNS_SERVER` 或密钥为空；
+- `P2D_DOMAIN` 或密钥为空；
 - `P2D_DNS_SERVER` 使用了主机名而不是 IP；
+- `P2D_IP_WHITELIST` 包含无效或重复 IP；
 - `P2D_AUTH_KEY` 少于 32 字节；
 - `P2D_PORTS` 包含空值、重复端口或超出 1–65535；
 - `P2D_BIND_ADDRESS` 不是合法 IP；
@@ -491,6 +504,7 @@ Client 不会回退到其他 DNS 服务器。检查 `P2D_DNS_SERVER` 是否为�
 ## 12. 安全说明
 
 - Garble 混淆、删除符号和随机 seed 只能提高分析成本；
+- `defaults.go` 只保存非敏感默认值；编译进二进制的字符串可以被提取，不能用于保存密钥；
 - 环境变量读取后删除可以减少 `/proc` 和子进程意外泄露，但密钥仍会存在于进程内存；
 - 环境文件必须限制为管理员/root 可读，推荐权限 `0600`；
 - HMAC 可以阻止不知道认证密钥的一方伪造消息，但客户端主机完全失陷后无法保证密钥；

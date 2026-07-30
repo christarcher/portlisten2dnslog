@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -12,22 +13,13 @@ import (
 	"portlistener2dns/client/internal/protocol"
 )
 
-const (
-	defaultPorts       = "139,445,1080,1099"
-	defaultBindAddress = "0.0.0.0"
-	defaultMarker      = "listener-req"
-	defaultQueueSize   = 256
-	defaultWorkers     = 2
-	defaultRetries     = 3
-	defaultQueryTimout = 3 * time.Second
-)
-
 type Config struct {
 	Domain      string
 	DNSServer   string
 	XORKey      []byte
 	AuthKey     []byte
 	Listen      []string
+	IPWhitelist map[netip.Addr]struct{}
 	Marker      string
 	QueueSize   int
 	Workers     int
@@ -42,9 +34,11 @@ type Config struct {
 // file or service manager.
 func ConfigFromEnv() (Config, error) {
 	values := map[string]string{}
+	present := map[string]bool{}
 	names := []string{
 		"P2D_DOMAIN",
 		"P2D_DNS_SERVER",
+		"P2D_IP_WHITELIST",
 		"P2D_XOR_KEY",
 		"P2D_AUTH_KEY",
 		"P2D_PORTS",
@@ -57,7 +51,7 @@ func ConfigFromEnv() (Config, error) {
 		"P2D_VERBOSE",
 	}
 	for _, name := range names {
-		values[name] = os.Getenv(name)
+		values[name], present[name] = os.LookupEnv(name)
 		_ = os.Unsetenv(name)
 	}
 
@@ -69,7 +63,7 @@ func ConfigFromEnv() (Config, error) {
 		QueueSize:   defaultQueueSize,
 		Workers:     defaultWorkers,
 		Retries:     defaultRetries,
-		QueryTimout: defaultQueryTimout,
+		QueryTimout: defaultQueryTimeout,
 	}
 
 	if cfg.Domain == "" {
@@ -83,9 +77,20 @@ func ConfigFromEnv() (Config, error) {
 	}
 
 	var err error
-	cfg.DNSServer, err = normalizeDNSServer(values["P2D_DNS_SERVER"])
+	cfg.DNSServer, err = normalizeDNSServer(
+		valueOrDefault(values["P2D_DNS_SERVER"], defaultDNSServer),
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("P2D_DNS_SERVER: %w", err)
+	}
+
+	whitelistValue := defaultIPWhitelist
+	if present["P2D_IP_WHITELIST"] {
+		whitelistValue = values["P2D_IP_WHITELIST"]
+	}
+	cfg.IPWhitelist, err = parseIPWhitelist(whitelistValue)
+	if err != nil {
+		return Config{}, fmt.Errorf("P2D_IP_WHITELIST: %w", err)
 	}
 
 	cfg.Listen, err = parseListenAddresses(
@@ -121,6 +126,27 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("DNS 命名空间无效: %w", err)
 	}
 	return cfg, nil
+}
+
+func parseIPWhitelist(value string) (map[netip.Addr]struct{}, error) {
+	whitelist := make(map[netip.Addr]struct{})
+	if strings.TrimSpace(value) == "" {
+		return whitelist, nil
+	}
+
+	for _, rawIP := range strings.Split(value, ",") {
+		rawIP = strings.TrimSpace(rawIP)
+		address, err := netip.ParseAddr(rawIP)
+		if err != nil {
+			return nil, fmt.Errorf("包含无效 IP %q", rawIP)
+		}
+		address = address.WithZone("").Unmap()
+		if _, exists := whitelist[address]; exists {
+			return nil, fmt.Errorf("包含重复 IP %s", address)
+		}
+		whitelist[address] = struct{}{}
+	}
+	return whitelist, nil
 }
 
 func parseListenAddresses(bindAddress, portsValue string) ([]string, error) {

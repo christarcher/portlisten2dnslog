@@ -40,7 +40,7 @@ func Run(ctx context.Context, cfg Config, logger *log.Logger) error {
 		acceptGroup.Add(1)
 		go func(value net.Listener) {
 			defer acceptGroup.Done()
-			acceptLoop(ctx, value, events, logger)
+			acceptLoop(ctx, value, cfg.IPWhitelist, events, logger)
 		}(listener)
 	}
 
@@ -53,7 +53,13 @@ func Run(ctx context.Context, cfg Config, logger *log.Logger) error {
 	return nil
 }
 
-func acceptLoop(ctx context.Context, listener net.Listener, events chan<- protocol.Event, logger *log.Logger) {
+func acceptLoop(
+	ctx context.Context,
+	listener net.Listener,
+	ipWhitelist map[netip.Addr]struct{},
+	events chan<- protocol.Event,
+	logger *log.Logger,
+) {
 	var retryDelay time.Duration
 	for {
 		connection, err := listener.Accept()
@@ -89,6 +95,17 @@ func acceptLoop(ctx context.Context, listener net.Listener, events chan<- protoc
 			continue
 		}
 
+		sourceIP := addrFromIP(remote.IP)
+		targetIP := addrFromIP(local.IP)
+		if !sourceIP.IsValid() || !targetIP.IsValid() {
+			logger.Printf("忽略 IP 地址无效的连接: %s -> %s", remote, local)
+			continue
+		}
+		if _, whitelisted := ipWhitelist[sourceIP]; whitelisted {
+			logger.Printf("忽略白名单来源 IP 的连接: %s -> %s", remote, local)
+			continue
+		}
+
 		id, err := protocol.NewUUID()
 		if err != nil {
 			logger.Printf("无法生成事件 UUID: %v", err)
@@ -96,15 +113,11 @@ func acceptLoop(ctx context.Context, listener net.Listener, events chan<- protoc
 		}
 		event := protocol.Event{
 			ID:         id,
-			SourceIP:   addrFromIP(remote.IP),
+			SourceIP:   sourceIP,
 			SourcePort: uint16(remote.Port),
-			TargetIP:   addrFromIP(local.IP),
+			TargetIP:   targetIP,
 			TargetPort: uint16(local.Port),
 			Time:       time.Now().UTC().Truncate(time.Second),
-		}
-		if !event.SourceIP.IsValid() || !event.TargetIP.IsValid() {
-			logger.Printf("忽略 IP 地址无效的连接: %s -> %s", remote, local)
-			continue
 		}
 
 		select {

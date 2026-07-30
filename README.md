@@ -16,7 +16,8 @@ PortListener2DNS 是面向隔离内网的轻量 TCP 扫描告警探针。客户�
 ## 主要能力
 
 - Go 客户端可一次监听多个 TCP 端口，例如 `139,445,1080,1099`；
-- 客户端只使用环境变量，读取后立即从自身进程环境删除；
+- 客户端可排除内网漏扫等固定来源 IP，不为白名单连接发送告警；
+- 非敏感默认值编译在客户端中，环境变量读取后立即从自身进程环境删除；
 - 客户端默认不写 stdout/stderr，配置错误通过退出码表示；
 - 使用 Garble `-literals -tiny -seed=random` 构建客户端；
 - 协议版本 2 支持 IPv4、IPv6、56 字符 DNS 标签切分；
@@ -116,11 +117,12 @@ Copy-Item .\server\config\server.env.example .\server\server.env
 
 ```text
 P2D_DOMAIN=<dnslog 根域名>
-P2D_DNS_SERVER=<内网 DNS IP:端口>
 P2D_XOR_KEY=<共享混淆密钥>
 P2D_AUTH_KEY=<共享认证密钥>
-P2D_PORTS=139,445,1080,1099
 ```
+
+`P2D_DNS_SERVER` 编译默认值为 `223.5.5.5`；`P2D_IP_WHITELIST` 默认排除
+`192.168.100.254,192.168.100.253`。需要时可通过同名环境变量覆盖。
 
 服务端还需要填写：
 
@@ -195,9 +197,55 @@ Import-EnvFile .\client.env
 
 客户端默认完全静默。排错时可以临时设置 `$env:P2D_VERBOSE='true'` 后重新启动。
 
+## Linux systemd 部署客户端
+
+先根据服务器架构选择构建产物：`x86_64` 使用 `linux-amd64`，`aarch64`/`arm64`
+使用 `linux-arm64`。以下以 amd64 为例，从仓库根目录执行：
+
+```sh
+sudo install -m 0755 \
+  client/bin/portlistener2dns-linux-amd64 \
+  /usr/local/bin/portlistener2dns
+
+sudo install -d -m 0700 /etc/portlistener2dns
+sudo install -m 0600 \
+  client/config/client.env.example \
+  /etc/portlistener2dns/client.env
+sudoedit /etc/portlistener2dns/client.env
+
+sudo install -m 0644 \
+  client/deploy/systemd/portlistener2dns-client.service \
+  /etc/systemd/system/portlistener2dns-client.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now portlistener2dns-client
+sudo systemctl status portlistener2dns-client
+```
+
+环境文件至少填写 `P2D_DOMAIN`、`P2D_XOR_KEY` 和 `P2D_AUTH_KEY`。DNS 服务器和 IP
+白名单已有编译默认值，不需要写入环境文件；要覆盖时再取消模板中的对应注释。该单元使用
+动态非特权用户，并只授予监听 1024 以下端口所需的 `CAP_NET_BIND_SERVICE`。
+如果隔离网不能访问默认的公共 DNS，必须将 `P2D_DNS_SERVER` 覆盖为可达的内网递归
+DNS IP。
+
+更新二进制后执行：
+
+```sh
+sudo install -m 0755 \
+  client/bin/portlistener2dns-linux-amd64 \
+  /usr/local/bin/portlistener2dns
+sudo systemctl restart portlistener2dns-client
+```
+
+客户端默认不写日志。排错时可在环境文件中临时设置 `P2D_VERBOSE=true`，并将 systemd
+单元的 `StandardOutput`/`StandardError` 临时改为 `journal` 后执行
+`sudo systemctl daemon-reload && sudo systemctl restart portlistener2dns-client`。
+服务端的完整 systemd 部署步骤见
+[Client/Server 结构与使用指南](docs/CLIENT_SERVER_GUIDE.md#9-linux-与-systemd)。
+
 ## 验证
 
-从另一台内网主机连接一个探针端口：
+确认测试主机 IP 不在 `P2D_IP_WHITELIST` 中，再从该主机连接一个探针端口：
 
 ```powershell
 Test-NetConnection <探针IP> -Port 445
@@ -221,6 +269,8 @@ Test-NetConnection <探针IP> -Port 445
 
 ## 安全边界
 
+- `defaults.go` 只应保存 DNS、白名单等非敏感默认值；编译进二进制的字符串仍可被提取，
+  不要把认证密钥、token 或真实凭据写入其中；
 - Garble 只能增加静态逆向成本，不能阻止拥有足够时间或主机权限的攻击者分析程序；
 - 攻击者若能读取环境文件、服务管理器配置或进程内存，仍可能取得认证密钥；
 - HMAC 提供真实性和完整性，循环异或只提供轻量混淆，不提供现代加密意义上的机密性；
